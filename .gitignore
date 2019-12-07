@@ -1,0 +1,5 @@
+cmake-*/
+.idea/
+ddb
+*.o
+*.d

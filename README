@@ -1,0 +1,5 @@
+ddb(1) -- A Dumb Debugger
+Copyright (c) 2019 Angel
+-------------------------------------------
+Nothing of value here, really.
+Just some random experiment with ptrace(2).
