@@ -21,7 +21,7 @@
 
 #include "list.h"
 
-/* holds the debugger context for the current inferior process */
+/* holds the debugger context for a specific process */
 struct debug_ctx {
     /* argv as a list */
     struct list argvl;
@@ -52,20 +52,23 @@ int debug_eval(struct debug_ctx *ctx, const char *expr);
 /* enables inferior process debugging */
 int debug_loop(struct debug_ctx *ctx);
 
-/* (exec) forks the current process and breaks before execution */
+/* forks the current process and breaks before execution */
 int debug_cmd_exec(struct debug_ctx *ctx, const struct list *args);
 
-/* (attach) attach to a running process */
+/* attach to a running process */
 int debug_cmd_attach(struct debug_ctx *ctx, const struct list *args);
 
-/* (detach) detaches from the current inferior process */
+/* continues execution on the inferior process */
+int debug_cmd_continue(struct debug_ctx *ctx, const struct list *args);
+
+/* detaches from the current inferior process */
 int debug_cmd_detach(struct debug_ctx *ctx, const struct list *args);
 
-/* (quit) quits the debugging session */
+/* quits the debugging session */
 int debug_cmd_quit(struct debug_ctx *ctx, const struct list *args);
 
-/* (info) displays process info */
+/* displays process info */
 int debug_cmd_info(struct debug_ctx *ctx, const struct list *args);
 
-/* (help) displays a list of the available commands */
+/* displays a list of the available commands */
 int debug_cmd_help(struct debug_ctx *ctx, const struct list *args);

@@ -22,6 +22,8 @@
 #define ERROR "\x1b[0;31merror:\x1b[0m "
 #define WARNING "\x1b[0;33mwarning:\x1b[0m "
 
+#define statf(m, ...) fprintf(stderr, "\x1b[2m" m "\x1b[0m", ##__VA_ARGS__)
+
 static inline int yes(void)
 {
     char res[2];

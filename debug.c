@@ -18,6 +18,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <stdio.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
@@ -29,15 +30,17 @@
 #include <sys/ptrace.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
 #include "util.h"
 #include "debug.h"
 
-static struct debug_cmd _commands[] = {{'e', "(exec) forks the current process and breaks before execution", debug_cmd_exec,   0},
-                                       {'a', "(attach) attach to a running process",                         debug_cmd_attach, 0},
-                                       {'d', "(detach) detaches from the current inferior process",          debug_cmd_detach, 0},
-                                       {'i', "(info) displays process info",                                 debug_cmd_info,   0},
-                                       {'q', "(quit) terminates the debugging session",                      debug_cmd_quit,   0},
-                                       {'h', "(help) displays a list of the available commands",             debug_cmd_help,   0}};
+static struct debug_cmd _commands[] = {{'e', "(exec) forks the current process and breaks before execution", debug_cmd_exec,     0},
+                                       {'a', "(attach) attach to a running process",                         debug_cmd_attach,   0},
+                                       {'d', "(detach) detaches from the current inferior process",          debug_cmd_detach,   0},
+                                       {'c', "(continue) continues execution on the inferior process",       debug_cmd_continue, 0},
+                                       {'i', "(info) displays process info",                                 debug_cmd_info,     0},
+                                       {'q', "(quit) terminates the debugging session",                      debug_cmd_quit,     0},
+                                       {'h', "(help) displays a list of the available commands",             debug_cmd_help,     0}};
 
 static int unquote_args(const char *str, size_t len, struct list *args)
 {
@@ -146,20 +149,37 @@ int debug_eval(struct debug_ctx *ctx, const char *expr)
     return res;
 }
 
+/* reset debugger status from a previous attached process */
+static void flush_prev(struct debug_ctx *ctx)
+{
+    ctx->status = PAUSED;
+    if (ctx->argvl.data)
+        list_free(&ctx->argvl);
+    if (ctx->ipath != NULL) {
+        free(ctx->ipath);
+        ctx->ipath = NULL;
+    }
+    printf("detached from process %u\n", ctx->pid);
+    ctx->pid = 0;
+}
+
 int debug_loop(struct debug_ctx *ctx)
 {
-    int child_st;
+    int status;
 
     if (!ctx->pid)
         return 0;
     if (ctx->status == RUNNING) {
-        if (waitpid(ctx->pid, &child_st, 0) < 0) {
+        if (waitpid(ctx->pid, &status, 0) && WIFEXITED(status)) {
             printf("inferior process %u exited with status %d\n", ctx->pid,
-                   child_st);
+                   status);
+            flush_prev(ctx);
             return 0;
         }
         if (ptrace(PTRACE_CONT, ctx->pid, NULL, NULL) == -1) {
             perror(ERROR "ptrace[PTRACE_CONT]");
+            if (errno == ESRCH) /* no such process */
+                flush_prev(ctx);
             return 0;
         }
     }
@@ -173,6 +193,17 @@ int debug_cmd_exec(struct debug_ctx *ctx, const struct list *args)
     if (!args->len) {
         printf(ERROR "expected a command line\n");
         return -1;
+    }
+    if (ctx->pid) {
+        printf("inferior process %u is still attached. Terminate it? [y/n]: ",
+               ctx->pid);
+        if (yes()) {
+            if (kill(ctx->pid, SIGTERM) == -1) {
+                perror(WARNING "kill[SIGTERM]");
+                /* previous inferior probably exited -- attach anyway */
+            }
+        }
+        debug_cmd_detach(ctx, NULL);
     }
     switch (pid = fork()) {
     case 0: /* child */
@@ -199,21 +230,22 @@ int debug_cmd_exec(struct debug_ctx *ctx, const struct list *args)
             strncpy(list_at(char *, &ctx->argvl, i), arg, len);
         }
         /* actually attach to PID */
-        if (debug_cmd_attach(ctx, &att_args) == -1) {
+        if (debug_cmd_attach(ctx, &att_args) < 0) {
             list_free(&att_args);
             return -1;
         }
         list_free(&att_args);
-        break;
+        return 0;
     }
     }
-    return 0;
 }
 
 int debug_cmd_attach(struct debug_ctx *ctx, const struct list *args)
 {
     unsigned long pid;
 
+    if (ctx->pid)
+        debug_cmd_detach(ctx, NULL);
     if (args->len != 1) {
         printf(ERROR "expected process ID as argument\n");
         return -1;
@@ -230,10 +262,24 @@ int debug_cmd_attach(struct debug_ctx *ctx, const struct list *args)
     }
     ctx->pid = pid;
     ctx->status = PAUSED;
-    if (!ctx->argvl.len) {
+    if (ctx->argvl.data == NULL) {
         // TODO: retrieve from /proc/<pid>/cmdline
     }
-    return -1;
+    return 0;
+}
+
+int debug_cmd_continue(struct debug_ctx *ctx, const struct list *args)
+{
+    if (!ctx->pid) {
+        printf(ERROR "no process attached\n");
+        return -1;
+    }
+    if (ptrace(PTRACE_CONT, ctx->pid, NULL, SIGCONT) == -1) {
+        perror(ERROR "ptrace[PTRACE_CONT]");
+        return -1;
+    }
+    ctx->status = RUNNING;
+    return 0;
 }
 
 int debug_cmd_detach(struct debug_ctx *ctx,
@@ -244,16 +290,10 @@ int debug_cmd_detach(struct debug_ctx *ctx,
         return -1;
     }
     if (ptrace(PTRACE_DETACH, ctx->pid, NULL, NULL) == -1) {
-        perror(ERROR "ptrace[PTRACE_DETACH]");
-        return -1;
+        /* inferior probably exited -- ignore */
+        perror(WARNING "ptrace[PTRACE_DETACH]");
     }
-    ctx->pid = 0;
-    ctx->status = RUNNING;
-    list_free(&ctx->argvl);
-    if (ctx->ipath) {
-        free(ctx->ipath);
-        ctx->ipath = NULL;
-    }
+    flush_prev(ctx);
     return 0;
 }
 
@@ -263,9 +303,11 @@ int debug_cmd_info(struct debug_ctx *ctx, const struct list *args)
         printf(ERROR "no process attached\n");
         return -1;
     }
-    printf("PID: %u\n", ctx->pid);
-    printf("program name: %s\n", list_at(const char *, &ctx->argvl, 0));
-    printf("image file: %s\n", ctx->ipath);
+    printf("pid: %u\n", ctx->pid);
+    printf("args(%lu):\n", ctx->argvl.len);
+    for (size_t i = 0; i < ctx->argvl.len; i++)
+        printf("\t%lu: %s\n", i, list_at(char *, &ctx->argvl, i));
+    printf("image: %s\n", ctx->ipath ? ctx->ipath : "");
     return 0;
 }
 
@@ -277,13 +319,12 @@ int debug_cmd_quit(struct debug_ctx *ctx, const struct list *args)
            ctx->pid);
     if (yes()) {
         if (kill(ctx->pid, SIGTERM) == -1) {
-            perror(ERROR "kill[SIGTERM]");
-            return -1;
+            /* the inferior process probably exited -- quit anyway */
+            perror(WARNING "kill[SIGTERM]");
         }
         exit(0);
     }
-    if (debug_cmd_detach(ctx, NULL) < 0)
-        return -1;
+    debug_cmd_detach(ctx, NULL);
     exit(0);
 }
 
@@ -301,10 +342,9 @@ int debug_cmd_help(struct debug_ctx *ctx, const struct list *args)
                 }
             }
         } else {
-            printf("%c  %s\n", _commands[i].name, _commands[i].help);
+            printf("%c: %s\n", _commands[i].name, _commands[i].help);
         }
-    }
-    for (size_t i = 0; i < sizeof(_commands) / sizeof(struct debug_cmd); i++)
         _commands[i].user = 0; /* reset user flag for every command */
+    }
     return 0;
 }

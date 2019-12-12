@@ -16,44 +16,66 @@
  */
 
 #include <stdio.h>
-#include <string.h>
-#include <limits.h>
+#include <stdlib.h>
+#include <getopt.h>
 
 #include "debug.h"
 #include "repl.h"
-#include "list.h"
 
-static void show_usage(void)
+static void __attribute__((noreturn)) show_usage(void)
 {
-    printf("usage: ddb PROGRAM [ARGS...]\n"
-           "       ddb -a PID\n");
+    fprintf(stderr, "usage: ddb PROGRAM [ARGS...]\n"
+                    "       ddb -a PID\n");
+    exit(EXIT_FAILURE);
 }
 
 int main(int argc, char *argv[])
 {
     struct debug_ctx ctx = {0};
+    struct list args = {0};
+    enum {
+        ATTACH, EXEC, NONE
+    } mode = NONE;
+    int opt;
+
+    while ((opt = getopt(argc, argv, ":a:"))) {
+        if (opt == 'a') {
+            if (mode == ATTACH) {
+                /* duplicate option */
+                fprintf(stderr, "error: multiple PIDs specified\n");
+                exit(EXIT_FAILURE);
+            }
+            mode = ATTACH;
+            list_create(&args, 1);
+            list_insert(&args, optarg);
+        } else if (opt == -1) {
+            break;
+        } else {
+            show_usage();
+        }
+    }
+    if (optind < argc) {
+        if (mode == NONE) {
+            mode = EXEC;
+            list_create(&args, argc - 1);
+            if (!strcmp("--", *(argv + 1)))
+                argv++;
+            while (*++argv)
+                list_insert(&args, *argv);
+        } else if (mode == ATTACH) {
+            fprintf(stderr, "unexpected argument after options\n");
+            exit(EXIT_FAILURE);
+        }
+    }
 
     repl_init();
-    repl_loop(&ctx);
-
-#if 0
-    if (!strcmp("-a", argv[1])) {
-        /* attach to process */
-        if (argc != 3) {
-            show_usage();
-            return 0;
-        }
-        ctx.pid = strtoul(argv[2], NULL, 10);
-        if (!ctx.pid || ctx.pid == ULONG_MAX) {
-            printf(ERROR "invalid process ID\n");
-            exit(1);
-        }
-    } else {
-        /* execute process */
-        ctx.argc = argc - 1;
-        ctx.argv = argv + 1;
+    if (mode == EXEC) {
+        debug_cmd_exec(&ctx, &args);
+    } else if (mode == ATTACH) {
+        debug_cmd_attach(&ctx, &args);
     }
-#endif
-
+    if (args.len)
+        list_free(&args);
+    repl_loop(&ctx);
     return 0;
 }
