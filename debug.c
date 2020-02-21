@@ -30,6 +30,7 @@
 #include <sys/ptrace.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #include "util.h"
 #include "debug.h"
@@ -94,6 +95,39 @@ static void args_free(const struct list *args)
 {
     for (size_t i = 0; i < args->len; i++)
         free(list_at(void *, args, i));
+}
+
+static int cmdline_read(pid_t pid, struct list *argvl)
+{
+    int retval = -1;
+    char cmdline_path[PATH_MAX];
+    int fd;
+    char buf[2048];
+    ssize_t nread;
+    size_t cmdline_len = 0;
+
+    snprintf(cmdline_path, sizeof(cmdline_path) - 1, "/proc/%u/cmdline", pid);
+    if ((fd = open(cmdline_path, O_RDONLY)) == -1) {
+        perror(ERROR "open");
+        return -1;
+    }
+    /* read cmdline */
+    while ((nread = read(fd, buf, sizeof(buf))) != 0) {
+        if (nread == -1) {
+            if (errno == EINTR)
+                continue;
+            perror(ERROR "read");
+            goto out;
+        }
+        cmdline_len += nread;
+    }
+    /* parse arguments */
+    /* FIXME: /proc/pid/cmdline does not quote arguments. Arguments are delimited
+     * by NUL characters */
+    retval = unquote_args(buf, cmdline_len, argvl);
+out:
+    close(fd);
+    return retval;
 }
 
 int debug_eval(struct debug_ctx *ctx, const char *expr)
@@ -206,14 +240,17 @@ int debug_cmd_exec(struct debug_ctx *ctx, const struct list *args)
         debug_cmd_detach(ctx, NULL);
     }
     switch (pid = fork()) {
+    case -1: /* error */
+        perror(ERROR "fork");
+        exit(EXIT_FAILURE);
     case 0: /* child */
         /* NUL-terminate argv */
         assert(list_insert((struct list *) args, NULL) != -1);
         if (execvp(list_at(char *, args, 0), (char **) args->data)) {
             perror(ERROR "execvp");
-            exit(0);
+            exit(EXIT_FAILURE);
         }
-        exit(0);
+        exit(EXIT_SUCCESS);
     default: { /* parent */
         /* construct args for (a)ttach command */
         char pid_s[8];
@@ -227,7 +264,7 @@ int debug_cmd_exec(struct debug_ctx *ctx, const struct list *args)
             const char *arg = list_at(const char *, args, i);
             const size_t len = strlen(arg);
             assert(list_insert(&ctx->argvl, malloc(1 + len)) != -1);
-            strncpy(list_at(char *, &ctx->argvl, i), arg, len);
+            strncpy(list_at(char *, &ctx->argvl, i), arg, 1 + len);
         }
         /* actually attach to PID */
         if (debug_cmd_attach(ctx, &att_args) < 0) {
@@ -263,7 +300,12 @@ int debug_cmd_attach(struct debug_ctx *ctx, const struct list *args)
     ctx->pid = pid;
     ctx->status = PAUSED;
     if (ctx->argvl.data == NULL) {
-        // TODO: retrieve from /proc/<pid>/cmdline
+        assert(list_create(&ctx->argvl, 1) != -1);
+        if (cmdline_read(ctx->pid, &ctx->argvl) == -1) {
+            printf(ERROR "could not read command line for PID %u\n", ctx->pid);
+            assert(list_free(&ctx->argvl) != -1);
+            return -1;
+        }
     }
     return 0;
 }
@@ -314,7 +356,7 @@ int debug_cmd_info(struct debug_ctx *ctx, const struct list *args)
 int debug_cmd_quit(struct debug_ctx *ctx, const struct list *args)
 {
     if (!ctx->pid)
-        exit(0);
+        exit(EXIT_SUCCESS);
     printf("inferior process %u is still attached. Terminate it? [y/n]: ",
            ctx->pid);
     if (yes()) {
@@ -322,10 +364,10 @@ int debug_cmd_quit(struct debug_ctx *ctx, const struct list *args)
             /* the inferior process probably exited -- quit anyway */
             perror(WARNING "kill[SIGTERM]");
         }
-        exit(0);
+        exit(EXIT_SUCCESS);
     }
     debug_cmd_detach(ctx, NULL);
-    exit(0);
+    exit(EXIT_SUCCESS);
 }
 
 int debug_cmd_help(struct debug_ctx *ctx, const struct list *args)
